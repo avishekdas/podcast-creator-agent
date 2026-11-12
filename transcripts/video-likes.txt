@@ -1,0 +1,56 @@
+# Topic: system design blueprint for handling high-throughput video likes
+# All numbers in this script are illustrative, not measurements of any real service.
+# Sources:
+# https://firebase.google.com/docs/firestore/solutions/counters  (sharded counters)
+# https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/Expressions.ConditionExpressions.html  (conditional writes)
+# https://redis.io/docs/latest/commands/incrby/  (atomic increments)
+# https://kafka.apache.org/documentation/  (partitioned logs, consumer groups)
+HOST_A: Welcome back to Signal and Noise. Today's topic sounds small but gets hard fast: how do you design the like button for a video platform?
+HOST_B: A like button? It's one number going up. Store a counter, add one. Done. What am I missing?
+HOST_A: Scale and skew. Picture a video that goes viral. To pick an illustrative number, say it gets 1.2 million likes per minute. That's twenty thousand writes per second, 20,000 QPS, all landing on one video.
+HOST_B: Okay, that's a lot of writes on one row.
+HOST_A: And reads are even bigger. Every person who watches, scrolls past, or refreshes sees the count. So the system is bursty on writes and very read-heavy on counts. Those two needs pull in different directions.
+HOST_B: Fine. Start with the API. What does the client actually call?
+HOST_A: Something like a PUT to slash videos, slash video ID, slash like, and a DELETE to the same path for an unlike. PUT and DELETE fit because the operation should be idempotent.
+HOST_B: Idempotent meaning what, exactly, for a like?
+HOST_A: One like per user per video, no matter how many times the request arrives. Phones retry on bad networks. People double tap. If each retry added one, the count would drift up.
+HOST_B: So how do you stop that?
+HOST_A: Keep a likes table keyed by user ID and video ID. That table is the source of truth. The write is conditional: insert only if the row doesn't exist. In DynamoDB that's a condition expression. In a relational database it's a unique constraint.
+HOST_B: And if the row already exists?
+HOST_A: Return success anyway. The video is liked. We only count a like when the insert actually happened.
+HOST_B: But wait. If every like is a conditional write to one table, isn't that table the bottleneck?
+HOST_A: Less than you'd think, because those writes spread out. The key is user plus video, so twenty thousand different users hit twenty thousand different rows. The hot spot is the counter, not the likes table.
+HOST_B: Right, the total. Everyone wants to change the same number.
+HOST_A: Exactly. So we don't update the total inside the request. After the like row is written, we publish an event to a stream, like Kafka or Amazon Kinesis, and return to the user right away.
+HOST_B: Why a stream instead of just calling Redis directly?
+HOST_A: Three reasons. It absorbs bursts, so a spike becomes a backlog instead of an outage. It lets us batch. And it decouples the user's request from the slow, contended part.
+HOST_B: Batch how?
+HOST_A: Consumers read the stream and aggregate in memory. For, say, one second, they sum all the plus ones and minus ones per video. Then they write one increment, like INCRBY in Redis, with the net change. Twenty thousand tiny writes become one write per consumer per second.
+HOST_B: How does the event get into the stream? The API writes the row and then publishes? What if it crashes in between?
+HOST_A: Good catch. That's the dual-write problem. The safer pattern is CDC, change data capture. You read the database's own change log, such as DynamoDB Streams, and turn committed inserts and deletes into events. Then nothing is published unless the row really changed.
+HOST_B: Okay. Now the counter itself. Where does it live?
+HOST_A: Common choices are Redis, which is fast and in memory, or Cassandra counter columns, which are durable and spread across nodes. Either way, treat the counter as derived data. You can rebuild it from the likes table.
+HOST_B: You still haven't solved one video getting hammered. Kafka partitions by key, right? If the key is video ID, the viral video lands on one partition.
+HOST_A: Yes, and that's the hot-key problem. One partition, one consumer, one counter key, all hot. There are two standard fixes. First, aggregate before the hot spot, so batching shrinks the load. Second, shard the counter.
+HOST_B: Shard a single number?
+HOST_A: Split it into, say, sixteen sub-counters for that video. Each write picks one at random. A read sums all sixteen. Writes spread over sixteen keys; reads cost a little more. Firestore's documentation describes this pattern because a single document only handles about one write per second.
+HOST_B: Doesn't summing sixteen keys on every read hurt?
+HOST_A: It would, which brings us to the read path. We cache the summed total with a short TTL, a time to live of maybe a few seconds. Most reads hit that cache, and popular videos can even be served from a CDN edge.
+HOST_B: So the number on screen is stale.
+HOST_A: Slightly, and that's acceptable. This is eventual consistency. Nobody can tell whether a video has 1,204,311 likes or 1,204,350. That's why apps show 1.2M. The display is already approximate, so we can be too.
+HOST_B: Except for me. If I tap like and the heart doesn't turn red, I'll tap again.
+HOST_A: Right, and that needs read-your-writes for your own state. Your heart comes from the likes table, or the client updates it optimistically. The global count can lag; your own like can't.
+HOST_B: What latency are we aiming for?
+HOST_A: An illustrative target: a P99 under 50 milliseconds for the like request. P99 means ninety-nine percent of requests finish faster than that. Because the request only does a conditional write and returns, that's realistic. The counter catches up a second or two later.
+HOST_B: Let me push on unlikes. I like, unlike, like again in a second. The events could arrive out of order.
+HOST_A: That's the classic race. The defense is that the likes table decides. Each event reflects a real state change in that table, so the net is correct even if the counter briefly overshoots. For ordering, partition by video so events for one video are processed in order, or attach a version to each row.
+HOST_B: And bots? Someone scripts ten thousand accounts to like a video.
+HOST_A: Rate limiting at the edge, per user and per IP, often a token bucket. Abuse detection runs on the same stream, looking for bursts from new accounts. Suspicious likes get removed later.
+HOST_B: Corrected how, if the counter is just a number?
+HOST_A: Reconciliation. Periodically, a batch job recounts likes from the source of truth for each video and fixes any counter that has drifted. It also covers failure modes: a consumer that crashed mid-batch, a Redis node that lost data, or an increment applied twice after a retry.
+HOST_B: Applied twice? I thought we were careful.
+HOST_A: Streams usually give at-least-once delivery, so a consumer can see an event twice. Increments aren't idempotent by nature. You can dedupe by event ID, or accept small errors and let reconciliation clean them up. Most designs do both.
+HOST_B: Okay, give me the whole thing in one breath.
+HOST_A: A conditional write to a likes table keyed by user and video guarantees one like per user. Change data capture feeds those writes into Kafka or Kinesis. Consumers batch them into net increments on sharded counters in Redis or Cassandra. Reads come from a short-TTL cache showing an approximate count, while your own like state reads from the source of truth. Rate limits and abuse checks protect the input, and a reconciliation job recounts from the likes table so mistakes don't last.
+HOST_B: So the like button is a small distributed system wearing a heart costume.
+HOST_A: Exactly. Thanks for listening to Signal and Noise.

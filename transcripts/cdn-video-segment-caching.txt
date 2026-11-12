@@ -1,0 +1,31 @@
+# Topic: how CDNs cache video segments
+# Numbers come from the sources below; none are measurements of a specific service.
+# Sources:
+# https://www.rfc-editor.org/rfc/rfc8216.html  (HLS playlists, segments, target duration, live reload rules)
+# https://www.fastly.com/documentation/guides/full-site-delivery/video/streaming-configuration-guidelines  (manifest vs segment TTLs, shielding)
+# https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/origin-shield.html  (Origin Shield, request consolidation, live streaming)
+HOST_A: Welcome back to Signal and Noise. Today: why a video can play smoothly for millions of people without melting the server it came from.
+HOST_B: I assume the answer is a CDN, a content delivery network. But a video is one giant file. How do you cache that?
+HOST_A: You mostly don't. Streaming formats like HLS, HTTP Live Streaming, cut the video into short segments, often a few seconds each. Each segment is its own small file with its own address.
+HOST_B: So the player downloads a list of pieces?
+HOST_A: Exactly. That list is the playlist, or manifest. The player fetches the playlist, then fetches the segments it names, one after another.
+HOST_B: And the CDN caches both?
+HOST_A: Yes, but very differently. That's the heart of it. A finished segment never changes. Once segment number forty exists, its bytes are fixed forever.
+HOST_B: So you can cache segments for a long time.
+HOST_A: Right. Fastly's example configuration gives segments a time to live, or TTL, of an hour. Some setups keep them much longer, because there is nothing to go stale.
+HOST_B: And the playlist?
+HOST_A: For a live stream, the playlist changes constantly. Every few seconds a new segment is added and an old one drops off the front.
+HOST_B: So a cached playlist goes stale fast.
+HOST_A: Very fast. Fastly suggests keeping the manifest TTL under half the segment length. With five second segments, that's one or two seconds.
+HOST_B: Why not just never cache the playlist?
+HOST_A: Because every viewer asks for it every few seconds. The HLS standard tells players to reload a live playlist about once per target duration, which is the longest segment length.
+HOST_B: Picture a big live game. Everyone requests the same brand new segment at the same moment. Doesn't the origin get flattened?
+HOST_A: That's the thundering herd problem. The fix is an extra caching layer between the edge and the origin, called a shield.
+HOST_B: How does a shield help?
+HOST_A: Edge servers ask the shield instead of the origin. If many requests arrive for an object that isn't cached yet, the shield combines them and fetches it once.
+HOST_B: Once? Even with thousands of viewers?
+HOST_A: Amazon's CloudFront documentation says Origin Shield can reduce that to as few as one request to your origin. It specifically lists live streaming as a use case.
+HOST_B: What about errors? If the origin hiccups, does the CDN cache the error too?
+HOST_A: It can, briefly. Fastly recommends caching error responses for about one second. That stops a flood of retries, but recovers almost immediately.
+HOST_B: Let me recap. Segments are immutable, so cache them for a long time. Playlists change, so cache them for seconds. Shields stop the herd.
+HOST_A: That's it. The video is just many small files, and the CDN treats each kind according to how often it changes. Thanks for listening to Signal and Noise.

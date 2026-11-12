@@ -1,0 +1,14 @@
+# Python environments and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Model downloads (several GB; recreated by setup.sh / first run)
+models/
+
+# Generated audio and Whisper checks (recreated by run.sh)
+out/
+
+# macOS
+.DS_Store

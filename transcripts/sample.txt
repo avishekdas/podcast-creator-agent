@@ -1,0 +1,9 @@
+HOST_A: Welcome back to Signal and Noise. Today we're asking a simple question: can a computer read a podcast script well enough that you'd keep listening?
+HOST_B: And the honest answer, a couple of years ago, was no. The voices sounded flat, and two speakers never sounded like they were in the same room.
+HOST_A: Right. So what changed?
+HOST_B: Two things. First, small open models got much better. Kokoro, for example, has only eighty-two million parameters, and it runs on a laptop.
+HOST_A: That's tiny compared with the big language models.
+HOST_B: Tiny, yes. Second, a new group of models now writes the whole conversation in one pass, so turn-taking, laughter, and pauses sound natural.
+HOST_A: Is there a catch?
+HOST_B: Usually a graphics card. Most of those dialogue models expect an NVIDIA GPU, so on a Mac you may need the cloud.
+HOST_A: Then let's listen and judge for ourselves. Thanks for joining us.
