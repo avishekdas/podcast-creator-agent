@@ -96,6 +96,24 @@ def test_problems_carry_turn_number():
     assert problems[0].turn == 2
 
 
+@pytest.mark.parametrize("text", ["Why not just call Reddis?", "What about the P99?",
+                                  "So it handles 50 thousand?", "Is that in DynamoDB?",
+                                  "Does that need 16 shards?"])
+def test_host_b_ending_on_key_term_flagged(text):
+    assert "b-ending" in rules(lint([turn(text, "HOST_B")], phonetics=PHONETICS))
+
+
+@pytest.mark.parametrize("text", ["Why not just call Reddis directly?", "What about the P99, then?",
+                                  "Store a counter, add one. Done.", "Okay. So what changed?",
+                                  "I thought we were careful."])
+def test_host_b_ending_on_plain_word_passes(text):
+    assert lint([turn(text, "HOST_B")], phonetics=PHONETICS) == []
+
+
+def test_host_a_ending_on_key_term_passes():
+    assert lint([turn("Store the total in Reddis.")], phonetics=PHONETICS) == []
+
+
 def test_load_phonetics_reads_rules_table():
     table = load_phonetics(ROOT / "scripts" / "speech_rules.md")
     assert table["Redis"] == "Reddis"

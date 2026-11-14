@@ -41,6 +41,8 @@ Hook, then 4 to 6 sections, then a one-paragraph recap and sign-off. Target leng
   - HOST_A is the explainer. HOST_B is the curious co-host who asks questions, restates things
     in plain words, and pushes back with real objections; HOST_A answers them.
   - Alternate speakers. Keep every turn under 40 words, so one Dia chunk holds one turn.
+  - Never end a HOST_B turn on a name or number: Dia tends to drop HOST_B's last word, so put
+    key terms mid-sentence ("Why call Reddis directly?", not "Why call Reddis?").
   - Must be technically correct and consistent with the sources.
 - Follow every rule in `scripts/speech_rules.md` (phonetic names, units in full, round numbers,
   no symbols or URLs in spoken lines, expand rare abbreviations on first use).
@@ -67,9 +69,10 @@ Then show the user the transcript path, word count, source list, and the full sc
   job is running: `pgrep -f engines/dia/generate.py`. If one is, stop and tell the user rather than
   starting a second. Otherwise run it in the background:
   ```bash
-  DIA_TEMPO=0.75 DIA_CHUNK_WORDS=20 DIA_KEEP_RAW=1 ./run.sh transcripts/<slug>.txt dia
+  DIA_KEEP_RAW=1 ./run.sh transcripts/<slug>.txt dia
   ```
-  It uses the fixed two-speaker voice reference in `refs/dia-ref.wav` automatically. Output:
+  The defaults are the "v2" setup the user picked by ear: the fixed two-speaker voice reference
+  in `refs/dia-ref.wav`, 20-word chunks and tempo 0.75 (see `engines/dia/settings.py`). Output:
   `out/<slug>.dia.mp3` plus `out/<slug>.dia.raw.wav`.
 
 After generating, check pronunciation with Whisper and report the match percentage and any

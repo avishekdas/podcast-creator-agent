@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Usage: ./run.sh <transcript.txt> [engine ...]   (default engine: kokoro)
 # Writes out/<transcript-name>.<engine>.mp3
+# Dia defaults (v2, picked by ear): fixed voice reference refs/dia-ref.wav, 20-word chunks,
+# tempo 0.75. They live in engines/dia/settings.py; DIA_* environment variables override them.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 [[ $# -ge 1 ]] || { echo "usage: $0 <transcript.txt> [kokoro ...]" >&2; exit 2; }

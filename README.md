@@ -24,9 +24,17 @@ Knobs (environment variables):
 | `KOKORO_VOICE_A` / `KOKORO_VOICE_B` | `af_heart` / `am_michael` | Kokoro preset voices |
 | `KOKORO_DEVICE` | `cpu` | `cpu` or `mps` (CPU was faster on M1, see below) |
 | `DIA_MODEL` | `mlx-community/Dia-1.6B-fp16` | MLX port of Dia |
-| `DIA_CHUNK_WORDS` | `45` | words per Dia call (one call holds ~30 s of audio) |
+| `DIA_CHUNK_WORDS` | `20` | words per Dia call (one call holds ~30 s of audio) |
 | `DIA_SEED` | `42` | sampling seed |
-| `DIA_TEMPO` | `1.0` | slow (<1) or speed up the Dia output with ffmpeg `atempo`, 0.5–2.0 |
+| `DIA_TEMPO` | `0.75` | slow (<1) or speed up the Dia output with ffmpeg `atempo`, 0.5–2.0 |
+| `DIA_REF_AUDIO` / `DIA_REF_TEXT` | `refs/dia-ref.wav` / `.txt` | fixed two-speaker voice reference; `none` turns it off |
+| `DIA_KEEP_RAW` | `0` | `1` also writes `out/<name>.dia.raw.wav` (before tempo) |
+
+**Dia default = "v2".** The user compared v1, v2 and the tempo variants by ear and judged
+`out/video-likes.dia.v2.mp3` the best, so the Dia defaults are exactly the v2 settings: the
+fixed reference clip, 20-word chunks, tempo 0.75 (see "Drift fix (v2)" below). The defaults live
+in `engines/dia/settings.py`; any `DIA_*` variable overrides them. Earlier sections list the
+settings each older run used explicitly.
 
 ## Results
 
@@ -147,6 +155,57 @@ Voice drift: `out/video-likes.dia.first30.mp3` and `out/video-likes.dia.last30.m
 and last 30 s of the Dia output. Whether the voices stay the same over six minutes **has to be
 judged by ear**; no tool here checks it.
 
+## Drift fix (v2)
+
+By ear, v1's last 30 s sounded worse than its first 30 s. Cause: v1 reused chunk 1's audio as
+the voice reference for every later chunk, and with `DIA_CHUNK_WORDS=20` chunk 1 was a single
+HOST_A turn, so HOST_B had no reference voice at all.
+
+Change: `engines/dia/generate.py` now gives every chunk, including chunk 1, the same fixed
+two-speaker reference and never replaces it with generated output. The seed stays fixed.
+
+- Your own clip: `DIA_REF_AUDIO=<wav> DIA_REF_TEXT="<exact [S1]/[S2] text, or a .txt path>"`.
+- Default: `refs/dia-ref.wav` + `refs/dia-ref.txt`, cut from v1's opening with
+  `tools/make_dia_ref.py` (chunk boundaries are the runs of exact silence between chunks).
+  It is 8.8 s, not 10–15 s: the end of v1's second turn was garbled ("What am I missing?" came out
+  as something like "One of my"), and the text must match the audio exactly, so the clip stops after "It's one
+  number going up." Its Whisper transcription matches the text word for word.
+- `DIA_REF_AUDIO=none` turns the reference off. A clip with no text, a missing file, or text
+  without both `[S1]` and `[S2]` is refused.
+
+v2 run: same script, `DIA_TEMPO=0.75 DIA_CHUNK_WORDS=20 DIA_KEEP_RAW=1`. v1 files are unchanged.
+
+| | v1 | v2 |
+|---|---|---|
+| Audio at tempo 0.75 | 394 s | 450 s |
+| Raw audio | 296 s | 337 s |
+| Generation time | 2,453 s (41 min) | 2,877 s (48 min; Kokoro and Whisper shared the machine part of the time) |
+| Whole-file Whisper match | 94.6% | 93.1% |
+| Script words recovered, turn by turn | 94.4% | 92.5% |
+| HOST_A turns, mean match | 0.943 | 0.951 |
+| HOST_B turns, mean match | 0.959 | **0.840** |
+| Turns missing their last word | 14 (2 HOST_B) | 21 (**11 HOST_B**) |
+
+The turn-by-turn check cuts each turn out of the raw audio at the chunk boundaries and transcribes
+it alone. That is fairer than the whole-file number, because on the full v2 file Whisper skipped
+whole stretches that are actually present (turn 37 has 11 s of audio and transcribes fine alone).
+
+Result: **the reference clip made HOST_B worse.** No reference text leaked into the output and
+nothing was garbled, but HOST_B turns often stop one word early ("change the same", "calling Reddis",
+"I thought we"). HOST_A improved slightly, and Redis was said correctly in one checked turn. The
+brief was to stop and report rather than tune, so this was not tuned further.
+
+A likely cause, not tested: the reference text ends with an `[S2]` turn and is prepended to each
+chunk, so a HOST_B chunk reads `... [S2] <ref> [S2] <turn>`, two `[S2]` turns in a row, which Dia
+may handle badly. Possible next step: keep two references, one ending in `[S1]` and one ending in
+`[S2]`, and use whichever keeps the tags alternating.
+
+Files: `out/video-likes.dia.v2.mp3` (0.75), `out/video-likes.dia.v2.tempo0.85.mp3`,
+`out/video-likes.dia.v2.raw.wav`, `out/video-likes.dia.v2.first30.mp3`,
+`out/video-likes.dia.v2.last30.mp3`, and `out/video-likes.dia.drift-ab.mp3` (v1's last 30 s, 1 s of
+silence, then v2's last 30 s). **Whether drift is fixed has to be judged by ear**; the numbers above
+measure words, not voice.
+
 ## Research to script
 
 A Claude Code skill in this folder turns a topic into a checked transcript, and optionally audio:
@@ -167,7 +226,8 @@ is running.
 - `scripts/lint_transcript.py <file> [--minutes N]`: flags abbreviated units (`1.2M`), URLs,
   symbols, numbers with more than 3 significant digits (years are fine), names from the phonetic
   table, turns over 40 words, and length outside ±15% of the target. Standard library only.
-- `./test.sh`: 32 pytest tests for the lint (pytest is fetched by uv; no engine venv needed).
+- `./test.sh`: pytest tests for the lint and the Dia settings (pytest is fetched by uv; no engine
+  venv needed).
 
 First run: "how CDNs cache video segments", 3 minutes, Kokoro.
 
@@ -189,7 +249,8 @@ run.sh, setup.sh          entry points
 scripts/transcript.py     shared transcript parser
 scripts/lint_transcript.py, speech_rules.md   transcript lint and speech rules
 .claude/skills/podcast-script/   /podcast-script skill (research to script)
-tests/, test.sh           lint tests
+tests/, test.sh           tests (lint, Dia settings)
+engines/dia/settings.py   Dia defaults (v2) and DIA_* overrides
 refs/                     Dia voice reference clip
 engines/kokoro/           generate.py + .venv
 engines/dia/              generate.py + .venv

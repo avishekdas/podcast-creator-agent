@@ -6,7 +6,8 @@ two-speaker reference clip (audio + its exact [S1]/[S2] text) so both hosts keep
 The reference is never replaced by generated output, which is what let voices drift before.
 
 Reference: DIA_REF_AUDIO (WAV) + DIA_REF_TEXT (the exact tagged text, or a path to a .txt).
-Default: refs/dia-ref.wav + refs/dia-ref.txt if present. DIA_REF_AUDIO=none disables it.
+Default: refs/dia-ref.wav + refs/dia-ref.txt. DIA_REF_AUDIO=none disables it.
+Defaults (v2, picked by ear): DIA_CHUNK_WORDS=20, DIA_TEMPO=0.75. All settings: settings.py.
 """
 from __future__ import annotations
 
@@ -22,49 +23,21 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from transcript import Turn, parse  # noqa: E402
 
-MODEL = os.environ.get("DIA_MODEL", "mlx-community/Dia-1.6B-fp16")
+from settings import load_settings  # noqa: E402
+
 TAGS = {"HOST_A": "[S1]", "HOST_B": "[S2]"}
-MAX_CHUNK_WORDS = int(os.environ.get("DIA_CHUNK_WORDS", "45"))
-SEED = int(os.environ.get("DIA_SEED", "42"))
-# Dia speaks fast; <1.0 slows the finished audio with ffmpeg atempo (pitch is kept).
-TEMPO = float(os.environ.get("DIA_TEMPO", "1.0"))
-if not 0.5 <= TEMPO <= 2.0:
-    raise SystemExit(f"DIA_TEMPO must be between 0.5 and 2.0, got {TEMPO}")
-KEEP_RAW = os.environ.get("DIA_KEEP_RAW", "0") == "1"  # also write <out>.raw.wav
 GAP_SECONDS = 0.25
-DEFAULT_REF = ROOT / "refs" / "dia-ref.wav"
-
-
-def reference() -> tuple[str | None, str | None]:
-    """Return (ref_audio_path, ref_text) or (None, None). Fails fast on a half-set pair."""
-    audio = os.environ.get("DIA_REF_AUDIO")
-    text = os.environ.get("DIA_REF_TEXT")
-    if audio == "none":
-        return None, None
-    if audio is None:
-        if not DEFAULT_REF.exists():
-            return None, None
-        audio, text = str(DEFAULT_REF), text or str(DEFAULT_REF.with_suffix(".txt"))
-    if not Path(audio).is_file():
-        raise SystemExit(f"DIA_REF_AUDIO not found: {audio}")
-    if not text:
-        raise SystemExit("DIA_REF_AUDIO needs DIA_REF_TEXT: the exact [S1]/[S2] text spoken in it")
-    if Path(text).is_file():
-        text = Path(text).read_text(encoding="utf-8")
-    text = " ".join(text.split())
-    if "[S1]" not in text or "[S2]" not in text:
-        raise SystemExit("DIA_REF_TEXT must contain both [S1] and [S2] turns")
-    return audio, text
+SETTINGS = load_settings(os.environ)  # v2 defaults; see settings.py
 
 
 def chunk(turns: list[Turn]) -> list[list[Turn]]:
-    """Group consecutive turns into chunks of at most MAX_CHUNK_WORDS words."""
+    """Group consecutive turns into chunks of at most SETTINGS.chunk_words words."""
     chunks: list[list[Turn]] = []
     current: list[Turn] = []
     words = 0
     for turn in turns:
         size = len(turn.text.split())
-        if current and words + size > MAX_CHUNK_WORDS:
+        if current and words + size > SETTINGS.chunk_words:
             chunks.append(current)
             current, words = [], 0
         current = [*current, turn]
@@ -82,11 +55,11 @@ def synthesize(transcript: Path, out_mp3: Path) -> None:
     import soundfile as sf
     from mlx_audio.tts.utils import load
 
-    model = load(MODEL)
+    model = load(SETTINGS.model)
     rate = model.config.model.sample_rate
     gap = np.zeros(int(rate * GAP_SECONDS), dtype=np.float32)
     groups = chunk(parse(transcript))
-    ref_path, ref_text = reference()
+    ref_path, ref_text = SETTINGS.ref_audio, SETTINGS.ref_text
     ref_audio = None
     if ref_path:
         from mlx_audio.utils import load_audio
@@ -96,7 +69,7 @@ def synthesize(transcript: Path, out_mp3: Path) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         parts: list[Path] = []
         for index, group in enumerate(groups):
-            mx.random.seed(SEED)
+            mx.random.seed(SETTINGS.seed)
             text = render(group)
             audio, _ = model._generate(text, ref_audio=ref_audio, ref_text=ref_text)
             samples = np.asarray(audio, dtype=np.float32)
@@ -112,12 +85,12 @@ def synthesize(transcript: Path, out_mp3: Path) -> None:
         listing = Path(tmp) / "list.txt"
         listing.write_text("".join(f"file '{p}'\n" for p in parts))
         out_mp3.parent.mkdir(parents=True, exist_ok=True)
-        if KEEP_RAW:  # untouched audio, so other tempos can be made without regenerating
+        if SETTINGS.keep_raw:  # untouched audio, so other tempos can be made without regenerating
             raw = out_mp3.with_suffix(".raw.wav")
             subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
                             "-i", str(listing), str(raw)], check=True)
             print(f"  raw audio kept at {raw}")
-        tempo_filter = [] if TEMPO == 1.0 else ["-af", f"atempo={TEMPO}"]
+        tempo_filter = [] if SETTINGS.tempo == 1.0 else ["-af", f"atempo={SETTINGS.tempo}"]
         subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
                         "-i", str(listing), *tempo_filter,
                         "-codec:a", "libmp3lame", "-q:a", "2", str(out_mp3)],
@@ -131,7 +104,7 @@ def main() -> None:
     args = parser.parse_args()
     started = time.perf_counter()
     synthesize(args.transcript, args.out_mp3)
-    print(f"dia: wrote {args.out_mp3} in {time.perf_counter() - started:.1f}s ({MODEL})")
+    print(f"dia: wrote {args.out_mp3} in {time.perf_counter() - started:.1f}s ({SETTINGS.model}, chunks of {SETTINGS.chunk_words} words, tempo {SETTINGS.tempo})")
 
 
 if __name__ == "__main__":

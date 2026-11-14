@@ -24,7 +24,9 @@ _UNIT = re.compile(r"\d(?:\.\d+)?[KMB]\b")
 _URL = re.compile(r"https?://|www\.|\b[\w-]+\.(?:com|org|net|io|dev|ai)\b", re.IGNORECASE)
 _SYMBOL = re.compile(r"[%$&/=+*#@<>|\\~^_\[\]{}]")
 _NUMBER = re.compile(r"\d[\d,]*(?:\.\d+)?")
-_PHONETIC_ROW = re.compile(r"^\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|")
+_NUMBER_WORDS = {"hundred", "thousand", "million", "billion", "percent", "milliseconds",
+                 "seconds", "minutes", "hours", "days", "shards", "times"}
+_PHONETIC_ROW =re.compile(r"^\|\s*`([^`]+)`\s*\|\s*`([^`]+)`\s*\|")
 
 
 @dataclass(frozen=True)
@@ -49,7 +51,24 @@ def _is_year(number: str) -> bool:
     return number.isdigit() and 1900 <= int(number) <= 2099
 
 
-def _turn_problems(index: int, text: str, phonetics: dict[str, str]) -> list[Problem]:
+def _ends_on_key_term(text: str) -> bool:
+    """True if the last word is a number or a name/acronym (capitalized, not starting a sentence)."""
+    tokens = re.findall(r"[\w']+|[.!?,;:]", text)
+    positions = [i for i, t in enumerate(tokens) if t[0].isalnum()]
+    if not positions:
+        return False
+    at = positions[-1]
+    last = tokens[at]
+    if any(c.isdigit() for c in last):
+        return True
+    before = tokens[at - 1] if at > 0 else "."
+    if last.lower() in _NUMBER_WORDS and any(c.isdigit() for c in before):
+        return True  # "50 thousand", "16 shards" style endings
+    return last[0].isupper() and last != "I" and before not in ".!?"
+
+
+def _turn_problems(index: int, text: str, phonetics: dict[str, str],
+                   speaker: str = "HOST_A") -> list[Problem]:
     found: list[Problem] = []
     for match in _UNIT.finditer(text):
         found.append(Problem(index, "unit", f"write the unit in full, not {match.group()!r}"))
@@ -64,6 +83,9 @@ def _turn_problems(index: int, text: str, phonetics: dict[str, str]) -> list[Pro
     for written, spoken in phonetics.items():
         if re.search(rf"\b{re.escape(written)}\b", text):
             found.append(Problem(index, "phonetic", f"write {written!r} as {spoken!r}"))
+    if speaker == "HOST_B" and _ends_on_key_term(text):
+        found.append(Problem(index, "b-ending", "HOST_B turn ends on a name or number; Dia often "
+                                                "drops a HOST_B turn's last word, so move it mid-sentence"))
     words = len(text.split())
     if words > MAX_TURN_WORDS:
         found.append(Problem(index, "turn-length", f"{words} words (max {MAX_TURN_WORDS})"))
@@ -73,7 +95,8 @@ def _turn_problems(index: int, text: str, phonetics: dict[str, str]) -> list[Pro
 def lint(turns: list[Turn], minutes: float | None = None,
          phonetics: dict[str, str] | None = None) -> list[Problem]:
     table = load_phonetics() if phonetics is None else phonetics
-    problems = [p for i, t in enumerate(turns, 1) for p in _turn_problems(i, t.text, table)]
+    problems = [p for i, t in enumerate(turns, 1)
+                for p in _turn_problems(i, t.text, table, t.speaker)]
     if minutes:
         total = sum(len(t.text.split()) for t in turns)
         target = minutes * WORDS_PER_MINUTE

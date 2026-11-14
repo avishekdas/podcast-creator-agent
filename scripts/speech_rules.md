@@ -17,7 +17,11 @@ that can be checked mechanically, and reads the phonetic table below, so edit th
 5. **Expand rare abbreviations on first use.** "CDC, change data capture". Common ones (API, CPU,
    GPU, URL, HTTP) need no expansion. Not linted; the writer checks this.
 6. **Short turns.** At most 40 words per turn, so each Dia chunk holds one turn.
-7. **Length.** Aim for 150 words per minute of target audio, within ±15%.
+7. **Don't end a HOST_B turn on a key term.** Dia often drops the last word of a HOST_B turn
+   (README, "Drift fix (v2)"). Put names and numbers mid-sentence: "Why call Reddis directly?",
+   not "Why call Reddis?". The lint flags a HOST_B turn whose last word is a number, a number
+   followed by a unit word ("50 thousand"), or a capitalized name or acronym.
+8. **Length.** Aim for 150 words per minute of target audio, within ±15%.
 
 ## Phonetic spellings
 
