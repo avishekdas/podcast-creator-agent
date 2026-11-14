@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from typing import Callable
+from typing import Callable, Sequence
 
 import numpy as np
 
@@ -27,6 +27,7 @@ class Attempt:
     seed: int
     ratio: float
     score: float | None
+    stage: str = "primary"
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,10 @@ class RetryResult:
     ok: bool
     ratio: float
     score: float | None
+    stage: str = "primary"
+
+
+Generator = Callable[[int], np.ndarray]
 
 
 def speech_seconds(audio: np.ndarray, rate: int) -> float:
@@ -74,35 +79,39 @@ def _stderr(line: str) -> None:
     print(line, file=sys.stderr, flush=True)
 
 
-def generate_with_retry(make: Callable[[int], np.ndarray], words: int, seed: int, rate: int,
-                        max_retries: int, verify: Callable[[np.ndarray], float] | None = None,
-                        label: str = "chunk", log: Callable[[str], None] = _stderr) -> RetryResult:
+def generate_with_retry(make: Generator, words: int, seed: int, rate: int, max_retries: int,
+                        verify: Callable[[np.ndarray], float] | None = None,
+                        label: str = "chunk", log: Callable[[str], None] = _stderr,
+                        fallbacks: Sequence[tuple[str, Generator]] = ()) -> RetryResult:
     """Call make(seed); while the result is bad, retry with seed + attempt, up to max_retries.
 
-    Returns the first attempt that passes, or else the best one (most speech, or highest
-    verifier score when a verifier is given). The generator's arrays are never modified.
+    If every seed fails, try each (name, generator) in `fallbacks` once, in order (the pipeline
+    passes the other reference clip, then no reference). Returns the first attempt that passes,
+    or else the best attempt across all stages (most speech, or highest verifier score when a
+    verifier is given). The generators' arrays are never modified.
     """
+    schedule = ([("primary", make, seed + i) for i in range(max_retries + 1)]
+                + [(name, generator, seed) for name, generator in fallbacks])
     expected = words * SECONDS_PER_WORD
     attempts: list[Attempt] = []
-    for attempt in range(max_retries + 1):
-        audio = make(seed + attempt)
+    for number, (stage, generator, stage_seed) in enumerate(schedule, 1):
+        audio = generator(stage_seed)
         ratio = speech_ratio(audio, rate, words)
         score = verify(audio) if verify is not None and ratio >= MIN_SPEECH_RATIO else (
             0.0 if verify is not None else None)
-        current = Attempt(audio, seed + attempt, ratio, score)
+        current = Attempt(audio, stage_seed, ratio, score, stage)
         attempts.append(current)
-        passed = _passes(current)
-        detail = (f"{label} attempt {attempt + 1}/{max_retries + 1} (seed {seed + attempt}): "
+        detail = (f"{label} attempt {number}/{len(schedule)} ({stage}, seed {stage_seed}): "
                   f"{speech_seconds(audio, rate):.1f}s speech, expected {expected:.1f}s"
                   + ("" if score is None else f", verify score {score:.2f}"))
-        if passed:
-            if attempt > 0:
-                log(f"  retry {detail}: ok")
-            return RetryResult(audio, current.seed, len(attempts), True, ratio, score)
-        if attempt < max_retries:
+        if _passes(current):
+            if number > 1:
+                log(f"  retry {detail}: ok, {stage} wins")
+            return RetryResult(audio, stage_seed, number, True, ratio, score, stage)
+        if number < len(schedule):
             log(f"  retry {detail}: bad, retrying")
     best = _best(attempts)
-    if max_retries > 0:
-        log(f"  retry {label} failed after {len(attempts)} attempts; keeping seed {best.seed} "
-            f"({best.ratio:.2f} of expected speech)")
-    return RetryResult(best.audio, best.seed, len(attempts), False, best.ratio, best.score)
+    if len(schedule) > 1:
+        log(f"  retry {label} failed after {len(attempts)} attempts; keeping {best.stage} seed "
+            f"{best.seed} ({best.ratio:.2f} of expected speech)")
+    return RetryResult(best.audio, best.seed, len(attempts), False, best.ratio, best.score, best.stage)

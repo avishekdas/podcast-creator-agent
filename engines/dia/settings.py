@@ -8,8 +8,9 @@ DIA_REF_MODE=alternate: two references, refs/dia-ref.* (ends with an [S2] turn) 
 refs/dia-ref-s1.* (ends with an [S1] turn; override with DIA_REF2_AUDIO/DIA_REF2_TEXT). Each chunk
 gets the one whose last speaker differs from the chunk's first speaker, so speaker tags alternate.
 DIA_REF_MODE=single ("fixed" is an alias) gives v2 back: one reference, no trimming. For an exact
-v2 rerun also set DIA_MAX_RETRIES=0. DIA_VERIFY=1 also Whisper-checks every chunk and retries
-garbled ones (slower; off by default).
+v2 rerun also set DIA_MAX_RETRIES=0 DIA_FALLBACK=. DIA_VERIFY=1 also Whisper-checks every chunk and retries
+garbled ones (slower; off by default). DIA_FALLBACK=other,none (default): when every seed fails,
+try the chunk once with the other reference clip, then once with no reference; empty turns it off.
 """
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ DEFAULT_REF_S1 = ROOT / "refs" / "dia-ref-s1.wav"  # same clip plus one [S1] tur
 REF_MODES = ("single", "alternate")
 REF_MODE_ALIASES = {"fixed": "single"}
 MAX_RETRIES_LIMIT = 10
+FALLBACK_STAGES = ("other", "none")  # other reference clip, then no reference
 DEFAULTS = {
     "DIA_MODEL": "mlx-community/Dia-1.6B-fp16",
     "DIA_CHUNK_WORDS": "20",
@@ -32,6 +34,7 @@ DEFAULTS = {
     "DIA_REF_MODE": "alternate",
     "DIA_MAX_RETRIES": "3",
     "DIA_VERIFY": "0",
+    "DIA_FALLBACK": "other,none",
 }
 TEMPO_RANGE = (0.5, 2.0)
 
@@ -50,6 +53,7 @@ class Settings:
     trim_silence: bool = True
     max_retries: int = 3
     verify: bool = False
+    fallback: tuple[str, ...] = FALLBACK_STAGES
 
 
 def _number(env: Mapping[str, str], name: str, kind: type):
@@ -126,6 +130,15 @@ def _max_retries(env: Mapping[str, str]) -> int:
     return value
 
 
+def _fallback(env: Mapping[str, str]) -> tuple[str, ...]:
+    stages = tuple(s.strip() for s in env.get("DIA_FALLBACK", DEFAULTS["DIA_FALLBACK"]).split(",")
+                   if s.strip())
+    unknown = [s for s in stages if s not in FALLBACK_STAGES]
+    if unknown:
+        raise SystemExit(f"DIA_FALLBACK stages must be from {FALLBACK_STAGES}, got {unknown}")
+    return stages
+
+
 def load_settings(env: Mapping[str, str]) -> Settings:
     tempo = _number(env, "DIA_TEMPO", float)
     if not TEMPO_RANGE[0] <= tempo <= TEMPO_RANGE[1]:
@@ -151,4 +164,5 @@ def load_settings(env: Mapping[str, str]) -> Settings:
         trim_silence=mode == "alternate",
         max_retries=_max_retries(env),
         verify=env.get("DIA_VERIFY", DEFAULTS["DIA_VERIFY"]) == "1",
+        fallback=_fallback(env),
     )

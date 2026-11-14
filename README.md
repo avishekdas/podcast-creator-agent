@@ -32,10 +32,11 @@ Knobs (environment variables):
 | `DIA_REF2_AUDIO` / `DIA_REF2_TEXT` | `refs/dia-ref-s1.wav` / `.txt` | reference ending with HOST_A (alternate mode) |
 | `DIA_MAX_RETRIES` | `3` | regenerate a silent or cut-short chunk with seed + attempt, 0–10 |
 | `DIA_VERIFY` | `0` | `1` also Whisper-checks every chunk and retries garbled ones (slower) |
+| `DIA_FALLBACK` | `other,none` | after the seed retries fail: one try with the other reference clip, then one with none; empty turns it off |
 | `DIA_KEEP_RAW` | `0` | `1` also writes `out/<name>.dia.raw.wav` (before tempo) |
 
 **Dia default = "v3 + retry".** See "Default: v3 + retry" below for why. To get v2 back exactly:
-`DIA_REF_MODE=single DIA_MAX_RETRIES=0`. The defaults live in `engines/dia/settings.py`; any
+`DIA_REF_MODE=single DIA_MAX_RETRIES=0 DIA_FALLBACK=`. The defaults live in `engines/dia/settings.py`; any
 `DIA_*` variable overrides them. Earlier sections list the settings each older run used explicitly.
 
 ## Results
@@ -267,7 +268,7 @@ adds a retry (`engines/dia/retry.py`):
 - `DIA_VERIFY=1` (off by default) also Whisper-checks every chunk and retries one that scores
   under 0.6 against its text. It checks every chunk, not just retried ones, because a garble like
   turn 20 ("Bad child") is full length and would never be flagged by duration.
-- `DIA_REF_MODE=single DIA_MAX_RETRIES=0` reproduces v2.
+- `DIA_REF_MODE=single DIA_MAX_RETRIES=0 DIA_FALLBACK=` reproduces v2.
 
 Limits found in a smoke test of turns 30 and 36 alone (one turn per chunk):
 
@@ -279,6 +280,49 @@ Limits found in a smoke test of turns 30 and 36 alone (one turn per chunk):
 - When two turns share one chunk, a whole missing turn can still pass the check: one test chunk
   of 15 words lost an 8-word turn and scored 0.32. The default 20-word chunks put nearly every
   turn in its own chunk, which avoids this for the video-likes script.
+
+### v4: first full run with the default
+
+`out/video-likes.dia.v4.*`, same script, default settings (v3 + retry), 3,635 s (61 min),
+293 s raw, 391 s at tempo 0.75. Turns 1–29 are identical to v3 (same seeds, no retries there).
+
+| | v3 | v4 |
+|---|---|---|
+| HOST_A turns, mean match (each turn alone) | 0.953 | 0.953 |
+| HOST_B turns, mean match | 0.783 | **0.845** |
+| Silent or failed turns | 20 (garbled), 30, 36 | 20 (garbled), 30 |
+| Turns missing their last word | 18 (9 HOST_B) | 17 (8 HOST_B) |
+| Gaps of 3 s or more (silencedetect, -45 dB) | 3, total 58.6 s | 2, total 36.2 s |
+| Retries | none | chunks 30, 36, 38 retried; 36 and 38 recovered, 30 failed all 4 seeds |
+| Reference text leaking | none | none |
+| Generation time | 3,193 s | 3,635 s |
+
+The two remaining gaps: turn 30 (22 s at 2:15 after tempo; silent on every seed), and a 10 s
+pause in the middle of turn 22 (at 2:16 in the MP3, 13.9 s after tempo). Trimming only removes
+silence at chunk edges, and turn 22 has enough speech to pass the retry check, so neither the
+trim nor the retry touches it. Turn 20 ("Batch how?" heard as "Bad child") is a full-length
+garble, which only `DIA_VERIFY=1` would catch.
+
+A/B: `out/video-likes.dia.v3v4-ab.mp3` is v3's turns 30–36 (87 s), 1 s of silence, then v4's
+turns 30–36 (66 s).
+
+### Reference fallback
+
+Seeds alone never recovered turn 30, so after the seed retries a still-bad chunk now gets one try
+with the other reference clip and then one with no reference (`DIA_FALLBACK=other,none`). The
+best attempt across all stages is kept; the log names the stage that won, and the run summary
+lists chunks kept from a fallback stage.
+
+Small test, turns 29–31 and 35–37 only (1,216 s):
+
+| Turn | Outcome | Whisper match (turn alone) |
+|---|---|---|
+| 30 "Doesn't summing sixteen keys on every read hurt?" | 4 seeds silent, other reference silent, **no reference: 4.7 s of speech** | 0.89 ("sixteen" heard as "16") |
+| 36 "What latency are we aiming for?" | recovered on the 2nd seed, as in v4 | 1.00 |
+| 29, 31, 35, 37 | first try | 0.91–0.94 |
+
+Caveat: with no reference clip Dia picks its own voice, so the rescued line may not sound like
+HOST_B. That has to be judged by ear.
 
 ## Research to script
 

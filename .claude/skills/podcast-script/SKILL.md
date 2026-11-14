@@ -73,7 +73,8 @@ Then show the user the transcript path, word count, source list, and the full sc
   ```
   The defaults are the "v3 + retry" setup the user picked by ear: two voice references chosen
   per chunk, silence trimmed, 20-word chunks, tempo 0.75, and up to 3 retries of a chunk that
-  comes back silent (see `engines/dia/settings.py`). Report any chunk the run summary lists as
+  comes back silent, then one try each with the other reference and with none (see
+  `engines/dia/settings.py`). Report any chunk the run summary lists as
   still bad after retries. Output:
   `out/<slug>.dia.mp3` plus `out/<slug>.dia.raw.wav`.
 

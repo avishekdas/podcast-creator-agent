@@ -7,7 +7,8 @@ reference is never replaced by generated output, which is what let voices drift 
 
 Defaults ("v3 + retry", see settings.py): two references chosen per chunk so speaker tags
 alternate, leading/trailing silence trimmed, and a chunk that comes back silent or cut short is
-regenerated with seed + attempt (DIA_MAX_RETRIES, default 3; see retry.py). DIA_VERIFY=1 also
+regenerated with seed + attempt (DIA_MAX_RETRIES, default 3; see retry.py), then once with the
+other reference clip and once with none (DIA_FALLBACK=other,none). DIA_VERIFY=1 also
 Whisper-checks each chunk. DIA_REF_MODE=single DIA_MAX_RETRIES=0 reproduces v2.
 """
 from __future__ import annotations
@@ -53,6 +54,22 @@ def render(turns: list[Turn]) -> str:
     return " ".join(f"{TAGS[t.speaker]} {t.text}" for t in turns)
 
 
+def fallback_stages(ref_path, maker):
+    """(name, generator) pairs to try once each after the seed retries, per DIA_FALLBACK.
+
+    "other": the reference clip this chunk did not get (alternate mode only).
+    "none": no reference at all.
+    """
+    others = [(p, t) for p, t in SETTINGS.references if p != ref_path]
+    stages = []
+    for name in SETTINGS.fallback:
+        if name == "other" and others:
+            stages.append(("other", maker(*others[0])))
+        elif name == "none" and ref_path is not None:
+            stages.append(("none", maker(None, None)))
+    return stages
+
+
 def make_verifier(tmp: Path, rate: int):
     """DIA_VERIFY=1: Whisper-transcribe a chunk and score it against its text (0 to 1)."""
     import difflib
@@ -96,31 +113,38 @@ def synthesize(transcript: Path, out_mp3: Path) -> None:
         parts: list[Path] = []
         retried: list[int] = []
         failed: list[int] = []
+        fallback_wins: list[str] = []
         verifier = make_verifier(Path(tmp), rate) if SETTINGS.verify else None
         for index, group in enumerate(groups):
             text = render(group)
             ref_path, ref_text = pick_reference(SETTINGS.references, TAGS[group[0].speaker])
-            ref_audio = loaded.get(ref_path)
 
-            def make(seed: int) -> np.ndarray:
-                mx.random.seed(seed)
-                audio, _ = model._generate(text, ref_audio=ref_audio, ref_text=ref_text)
-                samples = np.asarray(audio, dtype=np.float32)
-                if samples.size == 0:
-                    raise RuntimeError(f"chunk {index + 1}: Dia returned no audio")
-                mx.clear_cache()
-                if not SETTINGS.trim_silence:
-                    return samples
-                trimmed = trim_silence(samples, rate)
-                if samples.size - trimmed.size > rate:
-                    print(f"    trimmed {(samples.size - trimmed.size) / rate:.1f}s of silence", flush=True)
-                return trimmed
+            def maker(path, tagged, text=text, index=index):
+                """Generator for this chunk with one reference clip (or none when path is None)."""
+                def make(seed: int) -> np.ndarray:
+                    mx.random.seed(seed)
+                    audio, _ = model._generate(text, ref_audio=loaded.get(path), ref_text=tagged)
+                    samples = np.asarray(audio, dtype=np.float32)
+                    if samples.size == 0:
+                        raise RuntimeError(f"chunk {index + 1}: Dia returned no audio")
+                    mx.clear_cache()
+                    if not SETTINGS.trim_silence:
+                        return samples
+                    trimmed = trim_silence(samples, rate)
+                    if samples.size - trimmed.size > rate:
+                        print(f"    trimmed {(samples.size - trimmed.size) / rate:.1f}s of silence",
+                              flush=True)
+                    return trimmed
+                return make
 
             spoken = " ".join(t.text for t in group)
             result = generate_with_retry(
-                make, words=len(spoken.split()), seed=SETTINGS.seed, rate=rate,
+                maker(ref_path, ref_text), words=len(spoken.split()), seed=SETTINGS.seed, rate=rate,
                 max_retries=SETTINGS.max_retries, label=f"chunk {index + 1}",
-                verify=(lambda audio, spoken=spoken: verifier(audio, spoken)) if verifier else None)
+                verify=(lambda audio, spoken=spoken: verifier(audio, spoken)) if verifier else None,
+                fallbacks=fallback_stages(ref_path, maker))
+            if result.stage != "primary":
+                fallback_wins.append(f"{index + 1}:{result.stage}")
             if result.attempts > 1:
                 retried.append(index + 1)
             if not result.ok:
@@ -131,7 +155,8 @@ def synthesize(transcript: Path, out_mp3: Path) -> None:
             print(f"  [{index + 1}/{len(groups)}] {len(group)} turns, {result.audio.size / rate:.1f}s"
                   + (f", {result.attempts} attempts" if result.attempts > 1 else ""), flush=True)
         print(f"  retries: {len(retried)} chunks retried {retried or ''}; "
-              f"{len(failed)} still bad after retries {failed or ''}", flush=True)
+              f"{len(failed)} still bad after retries {failed or ''}; "
+              f"kept from a fallback stage: {fallback_wins or 'none'}", flush=True)
 
         listing = Path(tmp) / "list.txt"
         listing.write_text("".join(f"file '{p}'\n" for p in parts))
