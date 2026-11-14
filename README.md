@@ -35,7 +35,12 @@ Knobs (environment variables):
 | `DIA_FALLBACK` | `other,none` | after the seed retries fail: one try with the other reference clip, then one with none; empty turns it off |
 | `DIA_KEEP_RAW` | `0` | `1` also writes `out/<name>.dia.raw.wav` (before tempo) |
 
-**Dia default = "v3 + retry".** See "Default: v3 + retry" below for why. To get v2 back exactly:
+**Status: frozen (2026-11-14).** The Dia default is "v3 + retry + fallback", commit `3262f21`.
+The user listened to the runs and approved `out/video-likes.dia.v4.mp3` as the reference sound
+and asked for no further tuning. See "Default: v3 + retry" below for how the default was chosen
+and "v5 (check run)" for the last measured run.
+
+**Dia default = "v3 + retry + fallback".** To get v2 back exactly:
 `DIA_REF_MODE=single DIA_MAX_RETRIES=0 DIA_FALLBACK=`. The defaults live in `engines/dia/settings.py`; any
 `DIA_*` variable overrides them. Earlier sections list the settings each older run used explicitly.
 
@@ -323,6 +328,29 @@ Small test, turns 29–31 and 35–37 only (1,216 s):
 
 Caveat: with no reference clip Dia picks its own voice, so the rescued line may not sound like
 HOST_B. That has to be judged by ear.
+
+### v5 (check run)
+
+`out/video-likes.dia.v5.*`: the full script with the final default (v3 + retry + fallback),
+3,774 s (63 min), 282 s raw, 376 s at tempo 0.75. A check only; nothing was changed because of it.
+
+| | v4 (approved reference) | v5 |
+|---|---|---|
+| HOST_A turns, mean match (each turn alone) | 0.953 | 0.953 |
+| HOST_B turns, mean match | 0.845 | 0.882 |
+| Silent or failed turns | 20 (garbled), 30 (silent) | 20 (garbled) |
+| Turns missing their last word | 17 (8 HOST_B) | 16 (7 HOST_B) |
+| Gaps of 3 s or more (silencedetect, -45 dB) | 2, total 36.2 s | 1, total 13.9 s |
+| Retries | 30, 36, 38; 30 failed | 30, 36, 38; all recovered (30 by the no-reference stage) |
+| Reference text leaking | none | none |
+| Generation time | 3,635 s | 3,774 s |
+
+Known remaining issues, left as they are: turn 20 is garbled ("Batch how?" heard as "Bad child"),
+and turn 22 has a 10 s pause mid-turn (the 13.9 s gap). In v5, turn 30 uses Dia's own voice rather
+than HOST_B's reference, which has not been checked by ear.
+
+A/B: `out/video-likes.dia.v4v5-ab.mp3` is v4's turns 30–36 (66 s; turn 30 is the 22 s silence),
+1 s of silence, then v5's turns 30–36 (51 s), starting at 1:07 with the rescued turn 30.
 
 ## Research to script
 
