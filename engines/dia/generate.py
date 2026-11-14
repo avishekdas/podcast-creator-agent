@@ -1,13 +1,14 @@
 """Dia 1.6B (Nari Labs) via mlx-audio on Apple Silicon: native two-speaker dialogue.
 
 Dia writes a whole exchange in one pass using [S1]/[S2] tags, but one call holds only ~30 s
-of audio. So turns are grouped into short chunks, and every chunk gets the same fixed
-two-speaker reference clip (audio + its exact [S1]/[S2] text) so both hosts keep their voices.
-The reference is never replaced by generated output, which is what let voices drift before.
+of audio. So turns are grouped into short chunks (one turn each by default), and every chunk gets
+a fixed reference clip (audio + its exact [S1]/[S2] text) so both hosts keep their voices. The
+reference is never replaced by generated output, which is what let voices drift in v1.
 
-Reference: DIA_REF_AUDIO (WAV) + DIA_REF_TEXT (the exact tagged text, or a path to a .txt).
-Default: refs/dia-ref.wav + refs/dia-ref.txt. DIA_REF_AUDIO=none disables it.
-Defaults (v2, picked by ear): DIA_CHUNK_WORDS=20, DIA_TEMPO=0.75. All settings: settings.py.
+Defaults ("v3 + retry", see settings.py): two references chosen per chunk so speaker tags
+alternate, leading/trailing silence trimmed, and a chunk that comes back silent or cut short is
+regenerated with seed + attempt (DIA_MAX_RETRIES, default 3; see retry.py). DIA_VERIFY=1 also
+Whisper-checks each chunk. DIA_REF_MODE=single DIA_MAX_RETRIES=0 reproduces v2.
 """
 from __future__ import annotations
 
@@ -23,11 +24,14 @@ ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "scripts"))
 from transcript import Turn, parse  # noqa: E402
 
-from settings import load_settings  # noqa: E402
+from audio_utils import trim_silence  # noqa: E402
+from retry import generate_with_retry  # noqa: E402
+from settings import load_settings, pick_reference  # noqa: E402
 
 TAGS = {"HOST_A": "[S1]", "HOST_B": "[S2]"}
 GAP_SECONDS = 0.25
-SETTINGS = load_settings(os.environ)  # v2 defaults; see settings.py
+SETTINGS = load_settings(os.environ)  # v3 + retry defaults; see settings.py
+VERIFY_MODEL = "mlx-community/whisper-small.en-asr-fp16"
 
 
 def chunk(turns: list[Turn]) -> list[list[Turn]]:
@@ -49,6 +53,28 @@ def render(turns: list[Turn]) -> str:
     return " ".join(f"{TAGS[t.speaker]} {t.text}" for t in turns)
 
 
+def make_verifier(tmp: Path, rate: int):
+    """DIA_VERIFY=1: Whisper-transcribe a chunk and score it against its text (0 to 1)."""
+    import difflib
+    import re
+
+    import soundfile as sf
+    from mlx_audio.stt.utils import load as load_stt
+
+    stt = load_stt(VERIFY_MODEL)
+
+    def words(text: str) -> list[str]:
+        return re.findall(r"[a-z0-9]+", text.lower().replace("-", " "))
+
+    def verify(audio, spoken: str) -> float:
+        path = tmp / "verify.wav"
+        sf.write(path, audio, rate)
+        heard = stt.generate(str(path)).text
+        return difflib.SequenceMatcher(a=words(spoken), b=words(heard), autojunk=False).ratio()
+
+    return verify
+
+
 def synthesize(transcript: Path, out_mp3: Path) -> None:
     import mlx.core as mx
     import numpy as np
@@ -59,28 +85,53 @@ def synthesize(transcript: Path, out_mp3: Path) -> None:
     rate = model.config.model.sample_rate
     gap = np.zeros(int(rate * GAP_SECONDS), dtype=np.float32)
     groups = chunk(parse(transcript))
-    ref_path, ref_text = SETTINGS.ref_audio, SETTINGS.ref_text
-    ref_audio = None
-    if ref_path:
-        from mlx_audio.utils import load_audio
-        ref_audio = load_audio(ref_path, sample_rate=rate)  # loaded once, same for every chunk
-        print(f"  reference: {ref_path} ({ref_audio.shape[0] / rate:.1f}s)", flush=True)
+    from mlx_audio.utils import load_audio
+    loaded = {}  # each reference clip is loaded once and never replaced by generated output
+    for path, _ in SETTINGS.references:
+        loaded[path] = load_audio(path, sample_rate=rate)
+        print(f"  reference: {path} ({loaded[path].shape[0] / rate:.1f}s, mode {SETTINGS.ref_mode})",
+              flush=True)
 
     with tempfile.TemporaryDirectory() as tmp:
         parts: list[Path] = []
+        retried: list[int] = []
+        failed: list[int] = []
+        verifier = make_verifier(Path(tmp), rate) if SETTINGS.verify else None
         for index, group in enumerate(groups):
-            mx.random.seed(SETTINGS.seed)
             text = render(group)
-            audio, _ = model._generate(text, ref_audio=ref_audio, ref_text=ref_text)
-            samples = np.asarray(audio, dtype=np.float32)
-            if samples.size == 0:
-                raise RuntimeError(f"chunk {index}: Dia returned no audio")
+            ref_path, ref_text = pick_reference(SETTINGS.references, TAGS[group[0].speaker])
+            ref_audio = loaded.get(ref_path)
+
+            def make(seed: int) -> np.ndarray:
+                mx.random.seed(seed)
+                audio, _ = model._generate(text, ref_audio=ref_audio, ref_text=ref_text)
+                samples = np.asarray(audio, dtype=np.float32)
+                if samples.size == 0:
+                    raise RuntimeError(f"chunk {index + 1}: Dia returned no audio")
+                mx.clear_cache()
+                if not SETTINGS.trim_silence:
+                    return samples
+                trimmed = trim_silence(samples, rate)
+                if samples.size - trimmed.size > rate:
+                    print(f"    trimmed {(samples.size - trimmed.size) / rate:.1f}s of silence", flush=True)
+                return trimmed
+
+            spoken = " ".join(t.text for t in group)
+            result = generate_with_retry(
+                make, words=len(spoken.split()), seed=SETTINGS.seed, rate=rate,
+                max_retries=SETTINGS.max_retries, label=f"chunk {index + 1}",
+                verify=(lambda audio, spoken=spoken: verifier(audio, spoken)) if verifier else None)
+            if result.attempts > 1:
+                retried.append(index + 1)
+            if not result.ok:
+                failed.append(index + 1)
             wav = Path(tmp) / f"{index:03d}.wav"
-            sf.write(wav, np.concatenate([samples, gap]), rate)
+            sf.write(wav, np.concatenate([result.audio, gap]), rate)
             parts.append(wav)
-            print(f"  [{index + 1}/{len(groups)}] {len(group)} turns, {samples.size / rate:.1f}s",
-                  flush=True)
-            mx.clear_cache()
+            print(f"  [{index + 1}/{len(groups)}] {len(group)} turns, {result.audio.size / rate:.1f}s"
+                  + (f", {result.attempts} attempts" if result.attempts > 1 else ""), flush=True)
+        print(f"  retries: {len(retried)} chunks retried {retried or ''}; "
+              f"{len(failed)} still bad after retries {failed or ''}", flush=True)
 
         listing = Path(tmp) / "list.txt"
         listing.write_text("".join(f"file '{p}'\n" for p in parts))

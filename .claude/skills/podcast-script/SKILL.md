@@ -71,8 +71,10 @@ Then show the user the transcript path, word count, source list, and the full sc
   ```bash
   DIA_KEEP_RAW=1 ./run.sh transcripts/<slug>.txt dia
   ```
-  The defaults are the "v2" setup the user picked by ear: the fixed two-speaker voice reference
-  in `refs/dia-ref.wav`, 20-word chunks and tempo 0.75 (see `engines/dia/settings.py`). Output:
+  The defaults are the "v3 + retry" setup the user picked by ear: two voice references chosen
+  per chunk, silence trimmed, 20-word chunks, tempo 0.75, and up to 3 retries of a chunk that
+  comes back silent (see `engines/dia/settings.py`). Report any chunk the run summary lists as
+  still bad after retries. Output:
   `out/<slug>.dia.mp3` plus `out/<slug>.dia.raw.wav`.
 
 After generating, check pronunciation with Whisper and report the match percentage and any

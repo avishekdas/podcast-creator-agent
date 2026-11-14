@@ -27,14 +27,16 @@ Knobs (environment variables):
 | `DIA_CHUNK_WORDS` | `20` | words per Dia call (one call holds ~30 s of audio) |
 | `DIA_SEED` | `42` | sampling seed |
 | `DIA_TEMPO` | `0.75` | slow (<1) or speed up the Dia output with ffmpeg `atempo`, 0.5–2.0 |
-| `DIA_REF_AUDIO` / `DIA_REF_TEXT` | `refs/dia-ref.wav` / `.txt` | fixed two-speaker voice reference; `none` turns it off |
+| `DIA_REF_MODE` | `alternate` | `alternate`: two references, picked per chunk so speakers alternate, silence trimmed. `single` (alias `fixed`): one reference, no trimming (v2) |
+| `DIA_REF_AUDIO` / `DIA_REF_TEXT` | `refs/dia-ref.wav` / `.txt` | reference ending with HOST_B; `none` turns references off (single mode only) |
+| `DIA_REF2_AUDIO` / `DIA_REF2_TEXT` | `refs/dia-ref-s1.wav` / `.txt` | reference ending with HOST_A (alternate mode) |
+| `DIA_MAX_RETRIES` | `3` | regenerate a silent or cut-short chunk with seed + attempt, 0–10 |
+| `DIA_VERIFY` | `0` | `1` also Whisper-checks every chunk and retries garbled ones (slower) |
 | `DIA_KEEP_RAW` | `0` | `1` also writes `out/<name>.dia.raw.wav` (before tempo) |
 
-**Dia default = "v2".** The user compared v1, v2 and the tempo variants by ear and judged
-`out/video-likes.dia.v2.mp3` the best, so the Dia defaults are exactly the v2 settings: the
-fixed reference clip, 20-word chunks, tempo 0.75 (see "Drift fix (v2)" below). The defaults live
-in `engines/dia/settings.py`; any `DIA_*` variable overrides them. Earlier sections list the
-settings each older run used explicitly.
+**Dia default = "v3 + retry".** See "Default: v3 + retry" below for why. To get v2 back exactly:
+`DIA_REF_MODE=single DIA_MAX_RETRIES=0`. The defaults live in `engines/dia/settings.py`; any
+`DIA_*` variable overrides them. Earlier sections list the settings each older run used explicitly.
 
 ## Results
 
@@ -206,6 +208,78 @@ Files: `out/video-likes.dia.v2.mp3` (0.75), `out/video-likes.dia.v2.tempo0.85.mp
 silence, then v2's last 30 s). **Whether drift is fixed has to be judged by ear**; the numbers above
 measure words, not voice.
 
+## Alternating references (v3)
+
+Idea: v2's reference ends with HOST_B, so every HOST_B chunk saw two HOST_B turns in a row.
+`DIA_REF_MODE=alternate` keeps a second reference, `refs/dia-ref-s1.*` (the v2 clip plus v2's
+"Exactly. Thanks for listening to Signal and Noise.", which ends with HOST_A; its Whisper
+transcription matches word for word), and gives each chunk the reference whose last speaker
+differs from the chunk's first speaker. A smoke test showed Dia sometimes put 11 s of silence before
+a chunk, so alternate mode also trims leading and trailing silence per chunk
+(`engines/dia/audio_utils.py`).
+
+Run: same script and settings plus `DIA_REF_MODE=alternate`, 3,193 s (53 min), 307 s raw audio,
+409 s at tempo 0.75.
+
+| Turn by turn (Whisper on each turn alone) | v2 | v3 |
+|---|---|---|
+| Script words recovered | 92.5% | 91.5% |
+| HOST_A turns, mean match | 0.951 | 0.953 |
+| HOST_B turns, mean match | 0.840 | **0.783** |
+| Turns missing their last word | 21 (12 HOST_B) | 18 (9 HOST_B) |
+| Reference text leaking into output | none | none |
+
+On the word measures v3 looked worse, so that run stopped there: fewer HOST_B turns drop their last
+word, but three HOST_B turns failed outright: turn 20 "Batch how?" came out as "Bad child", and
+turns 30 and 36 are about 16 s of silence with no speech at all (trimming leaves an all-silent chunk
+unchanged).
+
+**Also found: dead air in v2.** Dia sometimes returns long silence instead of speech, in both modes.
+Stretches over 2 s with no sound, at tempo 0.75:
+
+| | Silent stretches |
+|---|---|
+| v2 (the default) | 0:00 (8 s), 2:14 (25 s), 4:06 (24 s), 5:31 (25 s), about 82 s in total |
+| v3 | 2:16 (14 s), 3:34 (23 s), 4:39 (23 s) |
+
+In v2, turn 30 ("Doesn't summing sixteen keys on every read hurt?") is entirely silent, so that
+line is missing.
+
+Files: `out/video-likes.dia.v3.mp3`, `.v3.raw.wav`, `.v3.first30.mp3`, `.v3.last30.mp3`, and
+`out/video-likes.dia.v2v3-ab.mp3` (v2's last 30 s, 1 s of silence, then v3's last 30 s).
+
+## Default: v3 + retry
+
+Why: the user listened to v3 and said it "sounded good", and the dead-air measurements favour it
+(ffmpeg `silencedetect` at -45 dB, gaps of 3 s or more: v2 has 4 gaps totalling 81 s, v3 has 3
+totalling 59 s). Its remaining failures are whole chunks that come back silent, so the default
+adds a retry (`engines/dia/retry.py`):
+
+- After trimming, a chunk is **bad** when its audible speech is under 0.3 of what Dia normally
+  needs for its word count (0.25 s a word, about 240 words a minute raw). The bar comes from the
+  v2/v3 chunks: every chunk Whisper confirmed as silent or cut short scored under 0.3 (turns 30
+  and 36: 0.00, turn 38: 0.22), and the lowest normal chunk scored 0.38. A flat "0.3 s per word"
+  bar would have flagged most normal chunks, since Dia talks at about 0.25 s a word.
+- A bad chunk is regenerated with seed + 1, + 2, + 3 (`DIA_MAX_RETRIES=3`). The first good
+  attempt is kept, or the one with the most speech. Each bad attempt is logged to stderr with
+  the chunk number, the attempt, and seconds of speech against the expected seconds, and the run
+  ends with a summary of retried and still-bad chunks.
+- `DIA_VERIFY=1` (off by default) also Whisper-checks every chunk and retries one that scores
+  under 0.6 against its text. It checks every chunk, not just retried ones, because a garble like
+  turn 20 ("Bad child") is full length and would never be flagged by duration.
+- `DIA_REF_MODE=single DIA_MAX_RETRIES=0` reproduces v2.
+
+Limits found in a smoke test of turns 30 and 36 alone (one turn per chunk):
+
+- Turn 36 came back silent, and the retry recovered it on the second attempt.
+- Turn 30 ("Doesn't summing sixteen keys on every read hurt?") stayed silent on all four seeds.
+  Changing the seed does not help it; the sampler does use the seed, so the silence comes from
+  this text with this reference. Possible next step, not done: on the last retry, switch to the
+  other reference clip, or reword the line.
+- When two turns share one chunk, a whole missing turn can still pass the check: one test chunk
+  of 15 words lost an 8-word turn and scored 0.32. The default 20-word chunks put nearly every
+  turn in its own chunk, which avoids this for the video-likes script.
+
 ## Research to script
 
 A Claude Code skill in this folder turns a topic into a checked transcript, and optionally audio:
@@ -250,7 +324,9 @@ scripts/transcript.py     shared transcript parser
 scripts/lint_transcript.py, speech_rules.md   transcript lint and speech rules
 .claude/skills/podcast-script/   /podcast-script skill (research to script)
 tests/, test.sh           tests (lint, Dia settings)
-engines/dia/settings.py   Dia defaults (v2) and DIA_* overrides
+engines/dia/settings.py   Dia defaults (v3 + retry) and DIA_* overrides
+engines/dia/retry.py      bad-chunk check and retry loop
+engines/dia/audio_utils.py   silence trimming
 refs/                     Dia voice reference clip
 engines/kokoro/           generate.py + .venv
 engines/dia/              generate.py + .venv
